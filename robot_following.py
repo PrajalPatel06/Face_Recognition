@@ -45,6 +45,7 @@ from movement_logic import get_distance_zone, get_movement_command
 from safety_controller import SafetyController
 from motor_controller import MotorController
 from network_motor_controller import NetworkMotorController
+from mqtt_motor_controller import MqttMotorController
 
 DATABASE_FILE = "embeddings/database_embeddings.pkl"
 TARGET_PERSON = "Person_B"
@@ -105,15 +106,47 @@ running = True
 distance_history = deque(maxlen=DISTANCE_SMOOTHING_SAMPLES)
 safety_controller = SafetyController()
 USE_NETWORK_CONTROLLER = False
+USE_MQTT_CONTROLLER = True
+ARM_KEY = ord(" ")
+WINDOW_NAME = "Person_B Robot Following"
 
-if USE_NETWORK_CONTROLLER:
+motor_controller = None
+controller_name = "SIMULATION"
+
+if USE_MQTT_CONTROLLER:
+    from mqtt_config import load_mqtt_config
+
+    try:
+        _mqtt_cfg = load_mqtt_config()
+    except ValueError as error:
+        print("=" * 60)
+        print("ESP32/MQTT DISABLED:", error)
+        print("Falling back to SIMULATION (no motors will move).")
+        print("=" * 60)
+    else:
+        motor_controller = MqttMotorController(config=_mqtt_cfg)
+        controller_name = "ESP32 via MQTT"
+        print(
+            f"MQTT controller: {_mqtt_cfg['broker_host']}:"
+            f"{_mqtt_cfg['broker_port']}"
+        )
+
+        if motor_controller.wait_until_connected(timeout=10.0):
+            print("MQTT broker connected.")
+        else:
+            print("MQTT broker not reachable yet; retrying in background.")
+
+if motor_controller is None and USE_NETWORK_CONTROLLER:
     motor_controller = NetworkMotorController(
         host="192.168.1.17",
         port=5005,
         timeout=2.0,
     )
-else:
+    controller_name = "NETWORK (Pi)"
+elif motor_controller is None:
     motor_controller = MotorController()
+
+can_arm = hasattr(motor_controller, "set_armed")
 
 
 def calculate_distance(face_width):
@@ -224,11 +257,17 @@ def recognition_worker():
 worker = threading.Thread(target=recognition_worker, daemon=True)
 worker.start()
 
-print("Robot-following simulation started")
+print("Robot following started")
 print("Target:", TARGET_PERSON)
 print("Focal length:", FOCAL_LENGTH, "px")
-print("Physical motor control: DISABLED")
+print("Motor controller:", controller_name)
 print("CUDA providers:", ort.get_available_providers())
+
+if can_arm:
+    print("Motors start DISARMED. Press SPACE to arm/disarm.")
+else:
+    print("Physical motor control: DISABLED")
+
 print("Press Q or ESC to exit")
 
 fps_start = time.time()
@@ -541,6 +580,16 @@ try:
             f"Verification age: {verification_age:.2f}s",
         ]
 
+        if can_arm:
+            esp32 = motor_controller.esp32_status()
+            esp32_text = (
+                f"ONLINE {esp32.get('state', '?')} {esp32.get('wifi_rssi', '?')}dBm"
+                if esp32["online"]
+                else "OFFLINE"
+            )
+            overlay.append(f"Controller: {controller_name}")
+            overlay.append(f"ESP32: {esp32_text}")
+
         for index, text in enumerate(overlay):
             cv2.putText(
                 frame,
@@ -562,15 +611,35 @@ try:
             2,
         )
 
-        cv2.imshow("Person_B Robot Following Simulation", frame)
+        if can_arm:
+            armed_text, armed_color = (
+                ("MOTORS ARMED [SPACE]", (0, 0, 255))
+                if motor_controller.armed
+                else ("MOTORS DISARMED [SPACE]", (0, 200, 255))
+            )
+            cv2.putText(
+                frame,
+                armed_text,
+                (width - 260, height - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.58,
+                armed_color,
+                2,
+            )
+
+        cv2.imshow(WINDOW_NAME, frame)
         key = cv2.waitKey(1) & 0xFF
 
         if key in (ord("q"), 27):
             break
 
+        if key == ARM_KEY and can_arm:
+            armed = motor_controller.set_armed(not motor_controller.armed)
+            print("Motors", "ARMED" if armed else "DISARMED")
+
         try:
             if cv2.getWindowProperty(
-                "Person_B Robot Following Simulation",
+                WINDOW_NAME,
                 cv2.WND_PROP_VISIBLE,
             ) < 1:
                 break
@@ -578,13 +647,22 @@ try:
             break
 
 except KeyboardInterrupt:
-    print("Stopping simulation...")
+    print("Stopping robot following...")
 
 finally:
     running = False
     worker.join(timeout=1.0)
+
+    # Send final STOP and release network resources.
+    if hasattr(motor_controller, 'close'):
+        try:
+            motor_controller.stop()
+        except Exception:
+            pass
+        motor_controller.close()
+
     cap.release()
     cv2.destroyAllWindows()
-    print("Robot-following simulation stopped.")
+    print("Robot following stopped.")
     print("Detection providers:", app.models["detection"].session.get_providers())
 print("Recognition providers:", app.models["recognition"].session.get_providers())

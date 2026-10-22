@@ -7,8 +7,13 @@ __pycache__/
 .env
 .env.*
 !.env.example
+!.env.mqtt.example
+esp32_mqtt_robot_controller/secrets.h
 
 database/
 embeddings/
 test_face.jpg
 test_image.jpeg
+*.onnx
+*_pre_mqtt.py
+*_pre_esp32.py

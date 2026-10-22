@@ -45,7 +45,7 @@ class SafetyController:
                 return "STOP"
 
 
-            return "SEARCH"
+            return "STOP"
 
 
         self.target_lost_since = None
